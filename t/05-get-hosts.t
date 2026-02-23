@@ -5,7 +5,7 @@ use lib 'lib';
 use Test::More;
 use File::Temp qw(tempfile);
 
-use SSHMultiManage::Common qw(get_hosts);
+use SSHMultiManage::Common qw(get_hosts get_hosts_enriched);
 
 # Helper: write a temp SSH config and parse it
 sub parse_config {
@@ -14,6 +14,14 @@ sub parse_config {
     print $fh $text;
     close $fh;
     return get_hosts($tmpfile);
+}
+
+sub parse_config_enriched {
+    my ($text) = @_;
+    my ($fh, $tmpfile) = tempfile(UNLINK => 1);
+    print $fh $text;
+    close $fh;
+    return get_hosts_enriched($tmpfile);
 }
 
 subtest 'basic host parsing' => sub {
@@ -109,6 +117,29 @@ Host primary alias1 alias2
 SSH
     ok(exists $hosts->{primary}, 'first name kept');
     ok(!exists $hosts->{alias1}, 'alias not top-level');
+};
+
+subtest 'enriched hosts preserve base fields' => sub {
+    no warnings 'redefine';
+    local *SSHMultiManage::Common::_enrich_host = sub {
+        my ($host) = @_;
+        return {
+            hostname => "${host}.example.net",
+            user     => 'sshg',
+            port     => '2201',
+        };
+    };
+
+    my $hosts = parse_config_enriched(<<'SSH');
+Host app01
+    # tags prod web
+SSH
+
+    ok(exists $hosts->{app01}, 'host parsed');
+    is($hosts->{app01}{hostname}, 'app01.example.net', 'enriched hostname applied');
+    is($hosts->{app01}{user}, 'sshg', 'enriched user applied');
+    is($hosts->{app01}{port}, '2201', 'enriched port applied');
+    is($hosts->{app01}{tags}, 'prod web', 'base tags preserved');
 };
 
 done_testing();

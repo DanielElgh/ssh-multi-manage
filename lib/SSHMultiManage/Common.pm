@@ -108,7 +108,9 @@ sub get_hosts {
 sub get_hosts_enriched {
     my $hosts_ref = get_hosts(@_);
     foreach my $host (keys %$hosts_ref) {
-        $hosts_ref->{$host} = _enrich_host($host);
+        my $base     = $hosts_ref->{$host} || {};
+        my $enriched = _enrich_host($host) || {};
+        $hosts_ref->{$host} = { %$base, %$enriched };
     }
     return $hosts_ref;
 }
