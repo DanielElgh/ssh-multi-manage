@@ -8,7 +8,6 @@ use FindBin;
 use lib "$FindBin::Bin/../lib";
 use SSHMultiManage::Common qw(get_hosts get_hosts_enriched arg_match);
 use SSHMultiManage::Version qw(print_version);
-use Data::Dumper;
 
 our $NAME = 'configdump (ssh-multi-manage)';
 
@@ -42,15 +41,87 @@ sub main {
 
     $host_ref = arg_match(\@args, '--enriched', '--enrich', '-e') ? get_hosts_enriched() : get_hosts();
 
-    print Dumper($host_ref) =~ s/^\$VAR1/hosts/r unless @args;
+    my %out;
 
-    foreach my $host (@args) {
-        if (!exists $host_ref->{$host}) {
-            warn "Host '$host' not found in configuration file\n";
-            next;
+    if (!@args) {
+        %out = %$host_ref;
+    }
+    else {
+        foreach my $host (@args) {
+            if (!exists $host_ref->{$host}) {
+                warn "Host '$host' not found in configuration file\n";
+                next;
+            }
+            $out{$host} = $host_ref->{$host};
         }
-        print Dumper($host_ref->{$host}) =~ s/^\$VAR1/$host/r;
     }
 
+    split_field_to_array('tags', \%out);
+    print pretty_json(\%out), "\n";
+
     return 0;
+}
+
+sub split_field_to_array {
+    my ($key, $data) = @_;
+
+    if (ref $data eq 'HASH') {
+        for my $k (keys %$data) {
+
+            if ($k eq $key && !ref $data->{$k}) {
+                my @tags = grep { length } split /\s+/, $data->{$k};
+                $data->{$k} = \@tags;
+            }
+            else {
+                split_field_to_array($key, $data->{$k});
+            }
+        }
+    }
+    elsif (ref $data eq 'ARRAY') {
+        split_field_to_array($key, $_) for @$data;
+    }
+
+    return $data;
+}
+
+sub pretty_json {
+    my ($data, $indent) = @_;
+    $indent //= 0;
+    my $pad  = '  ' x $indent;
+    my $pad2 = '  ' x ($indent + 1);
+
+    if (!defined $data) {
+        return "null";
+    }
+    elsif (ref $data eq 'HASH') {
+        my @pairs;
+        foreach my $k (sort keys %$data) {
+            my $v = pretty_json($data->{$k}, $indent + 1);
+            push @pairs, sprintf('%s"%s": %s', $pad2, _json_escape($k), $v);
+        }
+        return "{\n" . join(",\n", @pairs) . "\n$pad}";
+    }
+    elsif (ref $data eq 'ARRAY') {
+        my @vals = map { "$pad2" . pretty_json($_, $indent + 1) } @$data;
+        return "[\n" . join(",\n", @vals) . "\n$pad]";
+    }
+    elsif (!ref $data) {
+        if ($data =~ /\A-?\d+(?:\.\d+)?\z/) {
+            return $data;
+        }
+        return '"' . _json_escape($data) . '"';
+    }
+    else {
+        die "Unsupported ref type: " . ref($data);
+    }
+}
+
+sub _json_escape {
+    my ($s) = @_;
+    $s =~ s/\\/\\\\/g;
+    $s =~ s/"/\\"/g;
+    $s =~ s/\n/\\n/g;
+    $s =~ s/\r/\\r/g;
+    $s =~ s/\t/\\t/g;
+    return $s;
 }
