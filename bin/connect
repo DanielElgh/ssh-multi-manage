@@ -1,0 +1,422 @@
+#!/usr/bin/env perl
+# SPDX-License-Identifier: MIT
+
+use strict;
+use warnings;
+use utf8;
+use Carp qw(confess);
+use File::Temp qw(tempfile tempdir);
+
+use Curses qw(KEY_ENTER);
+use Curses::UI;
+use File::Spec;
+use Getopt::Long;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use SSHMultiManage::Common qw(get_config_file get_hosts check_port slurp);
+use SSHMultiManage::Version qw(print_version);
+
+our $NAME = 'connect (ssh-multi-manage)';
+
+my $graceful_exit = sub {
+    my ($cui_ref) = @_;
+    $cui_ref->leave_curses() if defined $cui_ref;
+    print "connect> exiting...\n";
+    exit;
+};
+
+exit main(@ARGV) unless caller;
+
+sub launch_ui {
+    my $host_ref = shift;
+    my $hosts_file = shift;
+
+    my $ui = {};
+
+    $ui->{cui} = create_ui();
+
+    install_handlers($ui->{cui});
+
+    $ui->{win} = create_window($ui->{cui}, $NAME);
+
+    $ui->{menu} = create_menu($ui->{win}, $ui->{cui}, $host_ref);
+
+    $ui->{menu}->focus;
+
+    $ui->{action_buttons} = create_action_buttons($ui->{win}, $ui->{menu}, $ui->{cui});
+
+    if(defined $hosts_file) {
+        $ui->{config_button} = create_config_button($ui->{win}, $ui->{cui}, $hosts_file);
+    }
+
+    set_key_bindings($ui->{cui});
+
+    return $ui->{cui}->mainloop;
+}
+
+sub install_handlers {
+    my ($cui_ref) = @_;
+
+    $SIG{TERM} = sub { $graceful_exit->($cui_ref) };
+
+    $SIG{INT}  = sub { $graceful_exit->($cui_ref) };
+
+    $SIG{__DIE__} = sub {
+        $cui_ref->leave_curses() if defined $cui_ref;
+        print STDERR "connect> @_";
+        exit 1;
+    };
+}
+
+sub create_ui {
+    return Curses::UI->new(
+        -color_support => 1,
+        -clear_on_exit => 1,
+    );
+}
+
+sub create_window {
+    my ($cui_ref, $title) = @_;
+
+     return $cui_ref->add(
+        'window', 'Window',
+        -border => 1,
+        -title  => $title
+    );
+
+}
+
+sub create_config_button {
+    my ($cui_win_ref, $cui_ref, $hosts_file) = @_;
+
+    my $home = $ENV{HOME} // "\0";
+    (my $clean_hostsfile = $hosts_file) =~ s/$home/~/;
+
+    return $cui_win_ref->add(
+        'config_button', 'Buttonbox',
+        -y       => -1,
+        -x       => -2,
+        -width   => length($clean_hostsfile),
+        -buttons => [
+            {
+                -label   => $clean_hostsfile,
+                -onpress => sub {
+                    handle_config($cui_ref, $hosts_file);
+                },
+            },
+        ],
+    );
+}
+
+
+sub get_max_host_and_auth {
+    my $host_ref = shift;
+    my ($max_host_len, $max_authority_len) = (0, 0);
+    foreach my $host (keys %{$host_ref}) {
+        my $h = $host_ref->{$host};
+        my $host_len = length $host;
+        $max_host_len = $host_len if $host_len > $max_host_len;
+        my $authority_len = length format_authority($h);
+        $max_authority_len = $authority_len if $authority_len > $max_authority_len;
+    }
+    return ($max_host_len, $max_authority_len);
+}
+
+sub format_authority {
+    my ($host_data) = @_;
+    return sprintf('(%s@%s:%s)', $host_data->{user}, $host_data->{hostname}, $host_data->{port});
+}
+
+sub create_menu {
+    my ($cui_win_ref, $cui, $host_ref) = @_;
+    my (@online_hosts, @offline_hosts);
+    my %labels;
+
+    my ($max_host_len, $max_authority_len) = get_max_host_and_auth($host_ref);
+
+    foreach my $host (sort keys %{$host_ref}) {
+        my $h = $host_ref->{$host};
+
+        my $online = (check_port($h->{hostname}, $h->{port}, 0.15)->{success});
+
+        $labels{$host} = sprintf("%-1ls  %-${max_host_len}s  %-${max_authority_len}s", #  (%s)",
+            ($online ? '🟩' : '🟥'), # 🟥🟧⬛⬜🟫🟪🟦
+            $host,
+            format_authority($h),
+            # Resolving hostnames made the UI sluggish on startup,
+            # especially with many hosts or when a hostname didn't exist.
+            #resolve_hostname($h->{hostname})
+        );
+
+        if ($online) {
+            push @online_hosts, $host;
+        } else {
+            push @offline_hosts, $host;
+        }
+
+    }
+    my @hosts = (@online_hosts, @offline_hosts);
+    return $cui_win_ref->add(
+        'menu', 'Listbox',
+        -y         => 1,
+        -padbottom => 1,
+        -height    => -1,
+        -htmltext  => 1,
+        -values    => [ @hosts ],
+        -labels    => { %labels },
+        -vscrollbar => 'right',
+
+        -onblur => sub {
+            my $lb  = shift;
+            my $val = $lb->get_active_value or return;
+
+            # copy original labels
+            my %tmp = %labels;
+
+            # add prefix only to the selected item
+            $tmp{$val} = "👉 " . $tmp{$val};
+            #$tmp{$val} = "<blink>$tmp{$val}</blink>";
+
+            # update labels and redraw
+            $lb->labels(\%tmp);
+            $lb->draw;
+        },
+
+        -onfocus => sub {
+            my $lb = shift;
+
+            # restore original labels
+            $lb->labels(\%labels);
+            $lb->draw;
+        },
+
+        -onchange => sub { handle_connect($_[0], $cui); $_[0]->clear_selection()  },
+    );
+}
+
+sub create_action_buttons {
+    my ($cui_win_ref, $cui_menu_ref, $cui) = @_;
+    return $cui_win_ref->add(
+        'action_buttons', 'Buttonbox',
+        -y      => -1,
+        -x      => 2,
+        -width  => 20,
+        -height => 1,
+        -fg     => 'white',
+        -bg     => 'blue',
+
+        -buttons => [
+            {
+                -label    => '< Connect >',
+                -onpress  => sub { handle_connect($cui_menu_ref, $cui) },
+            },
+            {
+                -label    => '< Quit >',
+                -shortcut => 'q',
+                -onpress  => sub {
+                    $cui->leave_curses;
+                    exit;
+                },
+            },
+        ]
+    );
+}
+
+sub handle_config {
+    my ($cui_ref, $file) = @_;
+    $cui_ref->leave_curses() if defined $cui_ref;
+    config_handler($file);
+}
+
+sub handle_connect {
+    my ($listbox, $cui_ref) = @_;
+    my $selected = $listbox->get_active_value();
+
+    unless (defined $selected) {
+        # No item selected
+        $cui_ref->beep;
+        return;
+    }
+
+    $cui_ref->leave_curses() if defined $cui_ref;
+    connection_handler($selected, $cui_ref);
+    $cui_ref->reset_curses() if defined $cui_ref;
+}
+
+sub set_key_bindings {
+    my ($cui_ref) = @_;
+
+    # bind Ctrl+X and Ctrl+C in Curses::UI if supported (controls send "\cX" and "\cC")
+    eval {
+        if ( $cui_ref->can('set_binding') ) {
+            $cui_ref->set_binding( $graceful_exit, "\cX" );
+            $cui_ref->set_binding( $graceful_exit, "\cC" );
+            $cui_ref->set_binding( $graceful_exit, "q" );
+            $cui_ref->set_binding( $graceful_exit, "Q" );
+        }
+        1;
+    } or do {
+        # ignore if set_binding isn't available
+    };
+}
+
+sub help {
+    my $ret = shift // 0;
+    print <<"END_HELP";
+$NAME - interactive SSH connection manager
+
+Usage:
+  $0 [OPTIONS]
+
+Options:
+  -f, --file       Use a specific SSH config file
+  -h, --help       Display this help and exit
+  -v, --version    Display version information and exit
+
+When run without these options the program launches the interactive UI.
+END_HELP
+    return $ret;
+}
+
+sub connection_handler {
+    my ($host, $cui) = @_;
+    my $tmpdir = tempdir( CLEANUP => 1 );
+
+    my ($err, $tmpfile) = tempfile(
+        'connect_ssh_stderr_XXXXX',
+        UNLINK => 0,
+        DIR => $tmpdir,
+    );
+
+    print "connect> Connecting to $host...\n";
+    my $start_time = time();
+    my $pid = fork();
+    die "fork failed: $!" unless defined $pid;
+
+    if ($pid == 0) {
+        # child
+        open STDERR, '>&', $err or die $!;
+        exec 'ssh', '-o', 'ConnectTimeout=3', $host;
+        die "exec failed: $!";
+    }
+
+    # parent
+    close $err;
+    waitpid $pid, 0;
+    my $exit_code = $? >> 8;
+    my $elapsed = time() - $start_time;
+
+    printf "connect> SSH to $host ended after %d seconds, with exit code %d.\n", int($elapsed), $exit_code;
+
+    if ($exit_code == 255 && -s $tmpfile) {
+        my $ssh_err_text = slurp($tmpfile);
+        $ssh_err_text =~ s/\P{Print}//g;
+
+        print "connect> SSH reported an error: '$ssh_err_text'\n";
+        my $win = $cui->getobj('window');
+        my $dialog = $win->add('ssh_err', 'Dialog::Error',
+            -message => $ssh_err_text,
+            -title => "SSH Error",
+        );
+
+        $dialog->set_binding(sub { $win->delete('ssh_err') }, "\e"); # Escape
+        $dialog->set_binding(sub { $win->delete('ssh_err') }, KEY_ENTER);
+        $cui->set_timer('timer_name', sub {
+            $win->delete('ssh_err');
+        }, 4);
+
+        $dialog->focus;
+
+    }
+
+    return $exit_code;
+}
+
+sub config_handler {
+    my $file = shift;
+    my $location_of_bin = File::Spec->rel2abs($FindBin::Bin);
+    my $executable_vihosts = File::Spec->catfile($location_of_bin, 'vihosts');
+    if (! -x $executable_vihosts) {
+        die("connect> Cannot find vihosts executable at '$executable_vihosts'\n");
+    }
+    print "connect> Invoking vihosts...\n";
+    system($executable_vihosts, $file);
+    my $ret = ($? >> 8);
+    return $ret;
+}
+
+sub main {
+
+    my @args = @_;
+
+    my $config_file = get_config_file();
+
+    GetOptions (
+        "f|file=s"  => \$config_file,
+        "h|help"     => sub { exit help(0) },
+        "v|version"  => sub { exit print_version($NAME) },
+        "<>" => sub {
+            my ($arg) = @_;
+            $config_file = $arg;
+        },
+    ) or do { return help(255) };
+
+    my $host_ref = get_hosts($config_file);
+
+    return launch_ui($host_ref, $config_file);
+}
+
+
+__END__
+
+=head1 NAME
+
+connect - interactive SSH connection manager
+
+=head1 SYNOPSIS
+
+connect [OPTIONS]
+
+=head1 DESCRIPTION
+
+B<connect> is an interactive SSH connection manager that allows users connect to predefined SSH hosts via a terminal-based user interface.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-h>, B<--help>
+
+Show help and exit.
+
+=item B<-f>, B<--file>
+
+Use a specific SSH config file.
+
+=item B<-v>, B<--version>
+
+Show version information and exit.
+
+=back
+
+=head1 EXIT STATUS
+
+0 on success, non-zero on error.
+
+=head1 FILES
+
+uses the ~/.ssh/config file by default.
+
+=head1 BUGS
+
+Please report any bugs or feature requests to the author.
+
+=head1 AUTHOR
+
+Daniel Elgh
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2025, 2026 Daniel Elgh
+SPDX-License-Identifier: MIT

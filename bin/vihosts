@@ -1,0 +1,164 @@
+#!/usr/bin/env perl
+# SPDX-License-Identifier: MIT
+
+use strict;
+use warnings;
+use utf8;
+use File::Temp qw(tempfile);
+use File::Copy qw(copy move);
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use Digest::SHA qw(sha256_hex);
+use IPC::Open3 qw(open3);
+use Symbol qw(gensym);
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use SSHMultiManage::Common qw(get_config_file arg_match);
+use SSHMultiManage::Version qw(print_version);
+use Getopt::Long;
+
+our $NAME = 'vihosts (ssh-multi-manage)';
+
+exit main(@ARGV) unless caller;
+
+sub help {
+    my $ret = shift // 0;
+    print <<"END_HELP";
+$NAME - safely edit SSH config with syntax validation
+
+Usage:
+  $0 [OPTIONS] [config file]
+
+Options:
+  -h, --help       Display this help and exit
+  -v, --version    Display version information and exit
+END_HELP
+    return $ret;
+}
+
+sub main {
+    my $file = get_config_file();
+
+    GetOptions (
+        "h|help"     => sub { exit help(0) },
+        "v|version"  => sub { exit print_version($NAME) },
+        "<>" => sub {
+            ($file) = shift @_;
+        },
+    ) or do { return help(255) };
+
+    -e $file or die "'$file' does not exist\n";
+    -f $file or die "'$file' is not a regular file\n";
+    -r $file or die "'$file' is not readable\n";
+    -w $file or die "'$file' is not writable\n";
+
+    print "Original file: $file\n";
+
+    # normalize path
+    $file = abs_path($file);
+    my $dir = dirname($file);
+
+    my ($fh, $tmpfile) = tempfile(
+        'edit_config_XXXXX',
+        DIR    => $dir,
+        UNLINK => 0,
+    );
+
+    close $fh or die "Failed to close temp filehandle: $!";
+
+    copy($file, $tmpfile)
+      or die "Failed to copy '$file' to '$tmpfile': $!";
+
+    print "Temporary copy: $tmpfile\n";
+
+    my $orig_checksum = checksum($file);
+
+    # Main edit / validate loop
+    while (1) {
+        system('vi', '-c', 'set filetype=sshconfig', $tmpfile);
+        if ($? == -1) {
+            unlink $tmpfile;
+            die "Failed to execute vi: $!\n";
+        } elsif ($? & 127) {
+            my $sig = ($? & 127);
+            unlink $tmpfile;
+            die "vi died with signal $sig\n";
+        } else {
+            my $exit = $? >> 8;
+            if ($exit != 0) {
+                print STDERR "Editor exited with status $exit.\n";
+                print STDERR "Press Enter to re-open editor, or 'q' then Enter to abort without saving: ";
+                chomp(my $ans = <STDIN> // '');
+                if ($ans =~ /^q/i) {
+                    unlink $tmpfile;
+                    return 1;
+                }
+                next;
+            }
+        }
+
+        print "Validating syntax...\n";
+        my $err = '';
+        if (is_config_valid($tmpfile, \$err)) {
+            print "Syntax is valid.\n";
+            last;
+        } else {
+            print STDERR "\nSyntax error:\n$err\n";
+            print STDERR "Press Enter to return to editor, or 'q' then Enter to abort without saving: ";
+            chomp(my $ans = <STDIN> // '');
+            if ($ans =~ /^q/i) {
+                unlink $tmpfile;
+                return 1;
+            }
+        }
+    }
+
+    my $new_checksum = checksum($tmpfile);
+
+    if ($new_checksum eq $orig_checksum) {
+        print "No changes detected. Original file unchanged.\n";
+        unlink $tmpfile;
+        return 0;
+    }
+
+    print "Changes detected. Updating original file.\n";
+
+    my $backup = "$file.old";
+
+    if (-e $backup) {
+        unlink $backup
+          or die "Failed to remove existing backup '$backup': $!";
+    }
+
+    rename($file, $backup)
+      or die "Failed to rename '$file' to '$backup': $!";
+
+    move($tmpfile, $file)
+      or die "Failed to move '$tmpfile' to '$file': $!";
+
+    print "Original file backed up as: $backup\n";
+    print "Updated config saved as:    $file\n";
+
+    return 0;
+}
+
+sub checksum {
+    my ($path) = @_;
+    open my $fh, '<', $path or die "Cannot open '$path': $!";
+    binmode($fh);
+    return sha256_hex(do { local $/; <$fh> });
+}
+
+sub is_config_valid {
+    my ($conf_file, $err_ref) = @_;
+    my $stderr = gensym();
+    my $pid = open3(undef, my $stdout, $stderr, 'ssh', '-G', '-F', $conf_file, '*');
+
+    my $out = do { local $/; <$stdout> // '' };
+    my $err = do { local $/; <$stderr> // '' };
+
+    waitpid($pid, 0);
+    $$err_ref = length($err) ? $err : $out;
+
+    return (($? >> 8) == 0);
+}

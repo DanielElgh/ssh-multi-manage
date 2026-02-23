@@ -1,0 +1,12 @@
+# Skip VS Code workspace files
+^\.vscode/
+
+# Skip Git repo internals
+^\.git/
+
+# Skip editor backup files
+~$
+\.bak$
+
+# Skip old Makefiles
+\.old$

@@ -1,0 +1,66 @@
+#!/usr/bin/env perl
+# SPDX-License-Identifier: MIT
+
+use strict;
+use warnings;
+use utf8;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use SSHMultiManage::Common qw(get_hosts);
+use SSHMultiManage::Ansible qw(ansible_to_ssh ssh_to_ansible);
+use SSHMultiManage::Version qw(print_version);
+use Getopt::Long;
+use File::Basename;
+
+my $exe = lc basename($0);
+
+our $NAME = (($exe eq 'a2s') ?
+    'a2s - Ansible-to-SSH' :
+    's2a - SSH-to-Ansible') .
+    ' (ssh-multi-manage)';
+
+my $in_file;
+
+exit main(@ARGV) unless caller;
+
+sub help {
+    my $ret = shift // 0;
+    print <<"END_HELP";
+$NAME - Convert an SSH config to an Ansible inventory file and vice versa
+Usage: $0 [options]
+
+Options:
+  -i, --input=<file>   Input file
+  -h, --help           Display this help and exit
+  -v, --version        Display version information and exit
+END_HELP
+    return $ret;
+}
+
+sub main {
+    GetOptions (
+        "i|input=s"  => \$in_file,
+        "h|help"     => sub { exit help(0) },
+        "v|version"  => sub { exit print_version($NAME) },
+        "<>" => sub {
+            my ($arg) = @_;
+            $in_file //= $arg;
+        },
+    ) or do { return help(255) };
+
+    if ($exe eq 'a2s') {
+        unless (defined $in_file) {
+            print STDERR "Missing input file\n\n";
+            help(1);
+        }
+        die "File not found: $in_file\n" unless -e $in_file;
+        ansible_to_ssh($in_file);
+    } else {
+        my $hosts = get_hosts($in_file);
+        ssh_to_ansible($hosts);
+    }
+
+    return 0;
+}
+
+

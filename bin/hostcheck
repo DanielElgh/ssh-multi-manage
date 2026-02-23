@@ -1,0 +1,106 @@
+#!/usr/bin/env perl
+# SPDX-License-Identifier: MIT
+
+use strict;
+use warnings;
+use utf8;
+
+use Term::ANSIColor;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use SSHMultiManage::Common qw(get_hosts_enriched arg_match get_maxlen check_port);
+use SSHMultiManage::Version qw(print_version);
+
+our $NAME = 'hostcheck (ssh-multi-manage)';
+
+exit main(@ARGV) unless caller;
+
+
+sub help {
+    my $ret = shift // 0;
+    print <<"END_HELP";
+$NAME - check if remote endpoint is available.
+
+Usage:
+  $0 [OPTIONS]
+
+Options:
+  -h, --help        Display this help and exit
+  -v, --version     Display version information and exit
+
+END_HELP
+    return $ret;
+}
+
+sub main {
+
+    return print_version($NAME)
+        if arg_match(\@_, '--version', '-v');
+    return help(0)
+        if arg_match(\@_, '--help', '-h');
+
+    my $host_ref = get_hosts_enriched();
+
+    my $maxlen = get_maxlen(keys %$host_ref);
+    my $max_jobs = $ENV{HOSTCHECK_JOBS} // 32;
+    $max_jobs = 1 if $max_jobs < 1;
+    my $active_children = 0;
+
+    for my $host (sort keys %$host_ref) {
+        while ($active_children >= $max_jobs) {
+            my $done = wait();
+            last if $done == -1;
+            $active_children--;
+        }
+
+        my $pid = fork;
+        die "fork failed: $!" unless defined $pid;
+        if ($pid) {
+            $active_children++;
+            next;
+        }
+
+        my $h = $host_ref->{$host};
+
+        my $endpoint = sprintf("%-${maxlen}s (%s:%s)", $host, $h->{hostname}, $h->{port});
+
+        my $result = check_port($h->{hostname}, $h->{port}, 3);
+
+        my ($status, $color, $detail) = $result->{success}
+            ? (' UP ', 'green', "$result->{latency} ms")
+            : ('DOWN', 'red',   $result->{error});
+
+        printf "[%s] %-50s %s\n",
+            colored_text($color, $status),
+            $endpoint,
+            colored_text('bright_black', "($detail)");
+
+        exit 0;
+    }
+
+    while ($active_children > 0) {
+        last if wait() == -1;
+        $active_children--;
+    }
+
+    return 0;
+}
+
+sub colored_text {
+    my $color = shift;
+    my $text = shift;
+    return sprintf('%s%s%s', _color($color), $text, _color('reset'));
+}
+
+sub color_ok {
+    return -t STDOUT
+        && (!$ENV{NO_COLOR})
+        && ($ENV{TERM} && $ENV{TERM} ne 'dumb');
+}
+
+sub _color {
+    my $c = shift;
+    return '' if !color_ok();
+    return color($c);
+}

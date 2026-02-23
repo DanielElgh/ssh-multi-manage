@@ -1,0 +1,10 @@
+.vscode/
+*.bak
+*.old
+*.swp
+Makefile
+MYMETA.*
+MANIFEST
+blib/
+pm_to_blib
+*.tar.gz

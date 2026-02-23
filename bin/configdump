@@ -1,0 +1,56 @@
+#!/usr/bin/env perl
+# SPDX-License-Identifier: MIT
+
+use strict;
+use warnings;
+use utf8;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use SSHMultiManage::Common qw(get_hosts get_hosts_enriched arg_match);
+use SSHMultiManage::Version qw(print_version);
+use Data::Dumper;
+
+our $NAME = 'configdump (ssh-multi-manage)';
+
+exit main(@ARGV) unless caller;
+
+sub help {
+    my $ret = shift // 0;
+    print <<"END_HELP";
+$NAME - dump SSH host configuration
+Usage:
+  $0 [host1 host2 ...]
+If no hosts are specified, dumps the entire configuration.
+Options:
+  -e, --enriched   Get all settings applicable to each host (including global settings)
+  -h, --help       Display this help and exit
+  -v, --version    Display version information and exit
+END_HELP
+        return $ret;
+}
+
+sub main {
+    my @args = @_;
+    my $host_ref;
+
+    if (arg_match(\@args, '--version', '-v')) {
+        return print_version($NAME);
+    }
+    if (arg_match(\@args, '--help', '-h')) {
+        return help(0)
+    }
+
+    $host_ref = arg_match(\@args, '--enriched', '--enrich', '-e') ? get_hosts_enriched() : get_hosts();
+
+    print Dumper($host_ref) =~ s/^\$VAR1/hosts/r unless @args;
+
+    foreach my $host (@args) {
+        if (!exists $host_ref->{$host}) {
+            warn "Host '$host' not found in configuration file\n";
+            next;
+        }
+        print Dumper($host_ref->{$host}) =~ s/^\$VAR1/$host/r;
+    }
+
+    return 0;
+}

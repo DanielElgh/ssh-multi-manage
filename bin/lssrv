@@ -1,0 +1,194 @@
+#!/usr/bin/env perl
+# SPDX-License-Identifier: MIT
+
+use strict;
+use warnings;
+use utf8;
+
+use Net::OpenSSH;
+use Term::Table;
+use File::Temp qw(tempfile tempdir);
+use threads;
+use Thread::Queue;
+use Term::ANSIColor;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use SSHMultiManage::Common qw(arg_match get_hosts resolve_hostname);
+use SSHMultiManage::Version qw(print_version);
+
+our $NAME = 'lssrv (ssh-multi-manage)';
+
+exit main(@ARGV) unless caller;
+
+sub help {
+    my $ret = shift // 0;
+    print <<"END_HELP";
+$NAME - list servers
+
+Usage:
+  $0 [OPTIONS] [filters]
+
+Lists configured servers and enriches the data with live information fetched from reachable servers.
+Filters can be any substring to match against the displayed columns (Host, IP, Tags, OS, Uptime).
+
+Options:
+  --hostnames      Output hostnames for bash completion and exit
+  -h, --help       Display this help and exit
+  -v, --version    Display version information and exit
+
+END_HELP
+    return $ret;
+}
+
+sub increment_progress {
+    print '#';
+}
+
+sub main {
+    my @args = @_;
+    my $bash_completion_mode = 0;
+
+    if (arg_match(\@args, '--version', '-v')) {
+        return print_version($NAME);
+    } elsif (arg_match(\@args, '--help', '-h')) {
+        return help(0);
+    } elsif (arg_match(\@args, '--hostnames', '--completion')) {
+        $bash_completion_mode = 1;
+    }
+
+    my @filters = @args;
+    my $host_ref = get_hosts();
+    my $host_count = scalar keys %$host_ref;
+
+    if ($bash_completion_mode) {
+        print "$_\n" for sort keys %$host_ref;
+        return 0;
+    }
+
+    if ($host_count == 0) {
+        print "No hosts found in configuration.\n";
+        return 0;
+    }
+
+    $| = 1;
+    print "\r", (' ' x length "Gathering data ["), ('   ' x $host_count), "]\r";
+    print "\r", "Gathering data [";
+
+    my @headers = qw(Host IP Tags OS Uptime);
+    my $row_queue = Thread::Queue->new();
+    my $host_queue = Thread::Queue->new(sort keys %$host_ref);
+
+    my $max_threads = $ENV{LSSRV_JOBS} // 16;
+    $max_threads = 1 if $max_threads < 1;
+    $max_threads = $host_count if $max_threads > $host_count;
+
+    $host_queue->enqueue((undef) x $max_threads);
+
+    my $tmpdir = tempdir(CLEANUP => 1);
+    my @threads;
+    for (1 .. $max_threads) {
+        push @threads, threads->create(sub {
+            while (defined(my $host = $host_queue->dequeue())) {
+                my $h = $host_ref->{$host};
+                my $hostname = $h->{hostname};
+                my $tags = $h->{tags};
+                my $ip = resolve_hostname($hostname);
+
+
+                my ($fh, $filename) = tempfile(
+                    'lssrv_XXXXX',
+                    UNLINK => 1,
+                    DIR    => $tmpdir,
+                );
+
+                increment_progress();
+
+                my $ssh = Net::OpenSSH->new(
+                    $host,
+                    master_stderr_fh => $fh,
+                    batch_mode       => 1,
+                    master_opts      => [ -o => 'ConnectTimeout=1' ],
+                );
+
+                increment_progress();
+
+                my ($os, $uptime) = ('', '');
+                if (!$ssh->error) {
+                    chop($os = $ssh->capture('. /etc/os-release && echo "$PRETTY_NAME"'));
+                    chop($uptime = $ssh->capture('uptime -p'));
+                    $uptime = cleanup_uptime($uptime);
+                } else {
+                    seek($fh, 0, 0);
+                    my $master_err = do { local $/; <$fh> };
+                    ($uptime) = $master_err =~ m/([^:\n]+)$/;
+                    $uptime =~ s/^\s+|\s+$//g;
+                    $uptime = '~' . $uptime . '~';
+                }
+                close $fh;
+
+                increment_progress();
+
+                my @row = (
+                    $host   // '',
+                    $ip     // '',
+                    $tags   // '',
+                    $os     // '',
+                    $uptime // '',
+                );
+
+                next unless filter_row(\@row, \@filters);
+                $row_queue->enqueue(\@row);
+            }
+        });
+    }
+
+    $_->join for @threads;
+
+    print "\r", (' ' x length "Gathering data ["), ('   ' x $host_count), " \r";
+
+    if (!$row_queue->pending()) {
+        print "No hosts matched the given filters.\n";
+        return 0;
+    }
+
+    my @rows = sort { $a->[0] cmp $b->[0] } $row_queue->extract(0, $row_queue->pending());
+
+    my $table = Term::Table->new(
+        header => \@headers,
+        rows   => \@rows,
+    );
+
+    my $yellow = color('yellow');
+    my $reset = color('reset');
+
+    for my $row ($table->render) {
+        $row =~ s/~(.*?)~/${yellow}${1}${reset}  /;
+        print "$row${reset}\n";
+    }
+
+    return 0;
+}
+
+sub filter_row {
+    my ($row, $filters) = @_;
+    return 1 unless @$filters;
+
+    for my $filter (@$filters) {
+        my $quoted_filter = quotemeta($filter);
+        next if grep { defined $_ && /$quoted_filter/i } @$row;
+        return 0;
+    }
+
+    return 1;
+}
+
+sub cleanup_uptime {
+    my $uptime = shift;
+    $uptime =~ s/^up\s+//;
+    $uptime =~ s/\b(\d+)\s+weeks?\b/$1w/g;
+    $uptime =~ s/\b(\d+)\s+days?\b/$1d/g;
+    $uptime =~ s/\b(\d+)\s+hours?\b/$1h/g;
+    $uptime =~ s/\b(\d+)\s+minutes?\b/$1m/g;
+    return $uptime;
+}
