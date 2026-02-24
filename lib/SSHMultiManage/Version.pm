@@ -9,7 +9,7 @@ use Carp qw(croak);
 use Exporter 'import';
 our @EXPORT_OK = qw(print_version);
 
-our $VERSION      = version->declare("v1.0.1");
+our $VERSION      = version->declare("v1.0.2_01");
 our $COPYRIGHT    = 'Copyright (C) 2025, 2026 Daniel Elgh';
 our $LICENSE      = 'MIT';
 our $LICENSE_LONG = <<'END_LICENSE';
