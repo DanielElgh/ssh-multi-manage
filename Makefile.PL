@@ -7,7 +7,7 @@ WriteMakefile(
     NAME         => 'SSHMultiManage',
     VERSION_FROM => 'lib/SSHMultiManage/Version.pm',
     ABSTRACT     => 'A lightweight toolkit that enhances SSH for managing multiple hosts. It checks host availability, latency, OS details, and uptime, and provides a text-based interface for quickly browsing and connecting to configured servers.',
-    AUTHOR       => 'Daniel Elgh <daniel.elgh@gmail.com>',
+    AUTHOR       => 'Daniel Elgh',
     LICENSE      => 'mit',
 
     PREREQ_PM => {
