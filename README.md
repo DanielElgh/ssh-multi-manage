@@ -149,4 +149,3 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 ## License
 
 [MIT](LICENSE) - Copyright 2025, 2026 Daniel Elgh
-
