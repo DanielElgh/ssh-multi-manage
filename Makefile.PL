@@ -15,7 +15,6 @@ WriteMakefile(
         'Curses'            => 0,
         'Curses::UI'        => 0,
         'Cwd'               => 0,
-        'Data::Dumper'      => 0,
         'Digest::SHA'       => 0,
         'File::Basename'    => 0,
         'File::Copy'        => 0,
