@@ -8,10 +8,10 @@ and this project follow [Semantic Versioning](https://semver.org/) for stable re
 ## [Unreleased]
 
 ### Changed
-- `configdump` now outputs configuration as JSON instead of Perl `Data::Dumper` format.
+- `configdump` outputs configuration as JSON instead of Perl `Data::Dumper`
 
 ### Fixed
-- `get_hosts_enriched()` now returns custom data set in `get_hosts()`.
+- `get_hosts_enriched()` correctly returns custom data defined in `get_hosts()`
 
 ## [1.0.0] - 2026-02-23
 
